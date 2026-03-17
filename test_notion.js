@@ -16,18 +16,18 @@ function hasUsableEmail(email) {
   const lower = email.toLowerCase().trim();
 
   const blocked = [
-  "user@domain.com",
-  "email@example.com",
-  "test@test.com",
-  "info@example.com",
-  "admin@example.com",
-  "contact@example.com",
-  "name@domain.com",
-  "your@email.com",
-  "missing@placeholder.com",
-  "example@gmail.com",
-  "youremail@eataly.com"
-];
+    "user@domain.com",
+    "email@example.com",
+    "test@test.com",
+    "info@example.com",
+    "admin@example.com",
+    "contact@example.com",
+    "name@domain.com",
+    "your@email.com",
+    "missing@placeholder.com",
+    "example@gmail.com",
+    "youremail@eataly.com"
+  ];
 
   if (blocked.includes(lower)) return false;
   if (!lower.includes("@")) return false;
@@ -36,9 +36,10 @@ function hasUsableEmail(email) {
   if (lower.includes("test.com")) return false;
   if (lower.includes("noreply")) return false;
   if (lower.includes("no-reply")) return false;
+
   if (lower.startsWith("example@")) return false;
-if (lower.startsWith("test@")) return false;
-if (lower.startsWith("your")) return false;
+  if (lower.startsWith("test@")) return false;
+  if (lower.startsWith("your")) return false;
 
   return true;
 }
@@ -103,6 +104,7 @@ async function getBatchLeads(limit = DAILY_TARGET) {
     .from("lead_buffer")
     .select("*")
     .eq("status", "buffer")
+    .not("email", "is", null)
     .order("quality_score", { ascending: false })
     .limit(limit);
 
@@ -111,7 +113,7 @@ async function getBatchLeads(limit = DAILY_TARGET) {
     return [];
   }
 
-  return data || [];
+  return (data || []).filter(lead => hasUsableEmail(lead.email));
 }
 
 async function sendToNotion(lead) {
@@ -209,39 +211,33 @@ async function removeFromBuffer(leadId) {
 }
 
 async function processLead(lead) {
-  if (!hasUsableEmail(lead.email)) {
-    console.log(`Skipping no usable email: ${lead.business_name}`);
-    await removeFromBuffer(lead.id);
-    return { success: false, skippedDuplicate: false, skippedNoEmail: true };
-  }
-
   const exists = await leadExistsInHistory(lead.dedupe_key);
 
   if (exists) {
     console.log(`Skipping duplicate already in history: ${lead.business_name}`);
     await removeFromBuffer(lead.id);
-    return { success: false, skippedDuplicate: true, skippedNoEmail: false };
+    return { success: false, skippedDuplicate: true };
   }
 
   console.log(`Sending: ${lead.business_name}`);
 
   const notionResult = await sendToNotion(lead);
   if (!notionResult) {
-    return { success: false, skippedDuplicate: false, skippedNoEmail: false };
+    return { success: false, skippedDuplicate: false };
   }
 
   const moved = await moveToHistory(lead, notionResult.id);
   if (!moved) {
-    return { success: false, skippedDuplicate: false, skippedNoEmail: false };
+    return { success: false, skippedDuplicate: false };
   }
 
   const removed = await removeFromBuffer(lead.id);
   if (!removed) {
-    return { success: false, skippedDuplicate: false, skippedNoEmail: false };
+    return { success: false, skippedDuplicate: false };
   }
 
   console.log(`Done: ${lead.business_name}`);
-  return { success: true, skippedDuplicate: false, skippedNoEmail: false };
+  return { success: true, skippedDuplicate: false };
 }
 
 async function main() {
@@ -254,18 +250,16 @@ async function main() {
   console.log("Buffer start:", bufferStart);
 
   const leads = await getBatchLeads(DAILY_TARGET);
-  console.log(`Found ${leads.length} leads to process`);
+  console.log(`Found ${leads.length} leads with usable emails to process`);
 
   let pushedToday = 0;
   let duplicatesSkipped = 0;
-  let noEmailSkipped = 0;
 
   for (const lead of leads) {
     const result = await processLead(lead);
 
     if (result.success) pushedToday++;
     if (result.skippedDuplicate) duplicatesSkipped++;
-    if (result.skippedNoEmail) noEmailSkipped++;
   }
 
   const bufferEnd = await countBuffer();
@@ -275,7 +269,7 @@ async function main() {
     raw_found: 0,
     qualified_found: leads.length,
     duplicates_skipped: duplicatesSkipped,
-    rejected_no_email: noEmailSkipped,
+    rejected_no_email: 0,
     pushed_today: pushedToday,
     buffer_start: bufferStart,
     buffer_end: bufferEnd,
@@ -288,7 +282,6 @@ async function main() {
     bufferStart,
     qualifiedFound: leads.length,
     duplicatesSkipped,
-    noEmailSkipped,
     pushedToday,
     bufferEnd
   });
