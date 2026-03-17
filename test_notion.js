@@ -8,7 +8,7 @@ const { createClient } = require("@supabase/supabase-js");
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-const DAILY_TARGET = 10;
+const DAILY_TARGET = 150;
 
 function hasUsableEmail(email) {
   if (!email) return false;

@@ -8,10 +8,10 @@ const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // How many leads you want sitting in buffer before scraper stops
-const TARGET_BUFFER = 50;
+const TARGET_BUFFER = 500;
 
 // How many Google Maps results to ask for per search
-const RESULTS_PER_SEARCH = 10;
+const RESULTS_PER_SEARCH = 20;
 
 // Wait time between checking Outscraper results
 const POLL_MS = 3000;
