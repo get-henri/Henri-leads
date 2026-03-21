@@ -47,7 +47,7 @@ function hasUsableEmail(email) {
 async function createScrapeRun() {
   const { data, error } = await supabase
     .from("scrape_runs")
-    .insert([{ status: "running", notes: "manual pipeline test" }])
+    .insert([{ status: "running", notes: "queue to notion run" }])
     .select()
     .single();
 
@@ -84,26 +84,39 @@ async function countBuffer() {
   return count || 0;
 }
 
-async function leadExistsInHistory(dedupeKey) {
-  const { data, error } = await supabase
-    .from("lead_history")
-    .select("id")
-    .eq("dedupe_key", dedupeKey)
-    .limit(1);
+async function countReady() {
+  const { count, error } = await supabase
+    .from("lead_buffer")
+    .select("*", { count: "exact", head: true })
+    .eq("status", "ready");
 
   if (error) {
-    console.error("Check history error:", error);
-    return false;
+    console.error("Count ready error:", error);
+    return 0;
   }
 
-  return data && data.length > 0;
+  return count || 0;
+}
+
+async function countQueued() {
+  const { count, error } = await supabase
+    .from("lead_buffer")
+    .select("*", { count: "exact", head: true })
+    .eq("status", "queued");
+
+  if (error) {
+    console.error("Count queued error:", error);
+    return 0;
+  }
+
+  return count || 0;
 }
 
 async function getBatchLeads(limit = DAILY_TARGET) {
   const { data, error } = await supabase
     .from("lead_buffer")
     .select("*")
-    .eq("status", "buffer")
+    .eq("status", "ready")
     .not("email", "is", null)
     .order("quality_score", { ascending: false })
     .limit(limit);
@@ -164,46 +177,18 @@ async function sendToNotion(lead) {
   return data;
 }
 
-async function moveToHistory(lead, notionPageId) {
-  const { error } = await supabase.from("lead_history").insert([
-    {
-      business_name: lead.business_name,
-      normalized_name: lead.normalized_name,
-      lead_type: lead.lead_type,
-      email: lead.email,
-      email_type: lead.email_type,
-      rating: lead.rating,
-      review_count: lead.review_count,
-      city: lead.city,
-      state: lead.state,
-      website: lead.website,
-      website_domain: lead.website_domain,
-      google_maps_url: lead.google_maps_url,
-      phone: lead.phone,
-      personalization_note: lead.personalization_note,
-      source: lead.source,
-      dedupe_key: lead.dedupe_key,
-      quality_score: lead.quality_score,
-      notion_page_id: notionPageId
-    }
-  ]);
-
-  if (error) {
-    console.error(`Move to history error for ${lead.business_name}:`, error);
-    return false;
-  }
-
-  return true;
-}
-
-async function removeFromBuffer(leadId) {
+async function markQueued(lead, notionPageId) {
   const { error } = await supabase
     .from("lead_buffer")
-    .delete()
-    .eq("id", leadId);
+    .update({
+      status: "queued",
+      queued_at: new Date().toISOString(),
+      notion_page_id: notionPageId
+    })
+    .eq("id", lead.id);
 
   if (error) {
-    console.error(`Remove from buffer error for ${leadId}:`, error);
+    console.error(`Mark queued error for ${lead.business_name}:`, error);
     return false;
   }
 
@@ -211,79 +196,73 @@ async function removeFromBuffer(leadId) {
 }
 
 async function processLead(lead) {
-  const exists = await leadExistsInHistory(lead.dedupe_key);
-
-  if (exists) {
-    console.log(`Skipping duplicate already in history: ${lead.business_name}`);
-    await removeFromBuffer(lead.id);
-    return { success: false, skippedDuplicate: true };
-  }
-
-  console.log(`Sending: ${lead.business_name}`);
+  console.log(`Queueing to Notion: ${lead.business_name}`);
 
   const notionResult = await sendToNotion(lead);
   if (!notionResult) {
-    return { success: false, skippedDuplicate: false };
+    return { success: false };
   }
 
-  const moved = await moveToHistory(lead, notionResult.id);
-  if (!moved) {
-    return { success: false, skippedDuplicate: false };
+  const queued = await markQueued(lead, notionResult.id);
+  if (!queued) {
+    return { success: false };
   }
 
-  const removed = await removeFromBuffer(lead.id);
-  if (!removed) {
-    return { success: false, skippedDuplicate: false };
-  }
-
-  console.log(`Done: ${lead.business_name}`);
-  return { success: true, skippedDuplicate: false };
+  console.log(`Queued: ${lead.business_name}`);
+  return { success: true };
 }
 
 async function main() {
   const run = await createScrapeRun();
   if (!run) return;
 
-  console.log("Started scrape run:", run.id);
+  console.log("Started queue run:", run.id);
 
   const bufferStart = await countBuffer();
+  const readyStart = await countReady();
+  const queuedStart = await countQueued();
+
   console.log("Buffer start:", bufferStart);
+  console.log("Ready start:", readyStart);
+  console.log("Queued start:", queuedStart);
 
   const leads = await getBatchLeads(DAILY_TARGET);
-  console.log(`Found ${leads.length} leads with usable emails to process`);
+  console.log(`Found ${leads.length} ready leads with usable emails to queue`);
 
-  let pushedToday = 0;
-  let duplicatesSkipped = 0;
+  let queuedToday = 0;
 
   for (const lead of leads) {
     const result = await processLead(lead);
-
-    if (result.success) pushedToday++;
-    if (result.skippedDuplicate) duplicatesSkipped++;
+    if (result.success) queuedToday++;
   }
 
   const bufferEnd = await countBuffer();
+  const readyEnd = await countReady();
+  const queuedEnd = await countQueued();
 
   await updateScrapeRun(run.id, {
     finished_at: new Date().toISOString(),
     raw_found: 0,
     qualified_found: leads.length,
-    duplicates_skipped: duplicatesSkipped,
+    duplicates_skipped: 0,
     rejected_no_email: 0,
-    pushed_today: pushedToday,
+    pushed_today: queuedToday,
     buffer_start: bufferStart,
     buffer_end: bufferEnd,
     status: "completed",
-    notes: "manual pipeline test finished"
+    notes: "queued ready leads to notion"
   });
 
-  console.log("Finished nightly job");
+  console.log("Finished queue job");
   console.log({
     bufferStart,
+    readyStart,
+    queuedStart,
     qualifiedFound: leads.length,
-    duplicatesSkipped,
-    pushedToday,
-    bufferEnd
+    queuedToday,
+    bufferEnd,
+    readyEnd,
+    queuedEnd
   });
 }
 

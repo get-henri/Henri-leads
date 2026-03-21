@@ -5,10 +5,27 @@ const OUTSCRAPER_API_KEY = process.env.OUTSCRAPER_API_KEY;
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
 
+if (!OUTSCRAPER_API_KEY) {
+  throw new Error("Missing OUTSCRAPER_API_KEY");
+}
+if (!SUPABASE_URL || !SUPABASE_KEY) {
+  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY");
+}
+
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
-// How many leads you want sitting in buffer before scraper stops
-const TARGET_BUFFER = 500;
+// =========================
+// INVENTORY / RUN SETTINGS
+// =========================
+
+// Hard cap: never exceed this many usable leads total
+const MAX_LEADS = 10000;
+
+// Refill only when inventory drops below this
+const REFILL_TRIGGER = 8000;
+
+// Max number of new leads to add per scraper run
+const BATCH_TARGET = 100;
 
 // How many Google Maps results to ask for per search
 const RESULTS_PER_SEARCH = 20;
@@ -19,7 +36,10 @@ const POLL_MS = 3000;
 // Max number of times to poll Outscraper before giving up
 const MAX_POLLS = 10;
 
-// Southern states only
+// =========================
+// SEARCH MAP
+// =========================
+
 const SEARCHES = [
   { query: "catering", city: "Tampa", state: "FL" },
   { query: "meal prep", city: "Tampa", state: "FL" },
@@ -239,7 +259,6 @@ function classifyLeadType(place) {
     .toLowerCase();
 
   if (text.includes("food truck")) return "food_truck";
-
   if (text.includes("bakery")) return "bakery";
 
   if (
@@ -271,35 +290,17 @@ function shouldRejectByLeadType(place, leadType) {
     .toLowerCase();
 
   if (leadType === "bakery") {
-    const badBakeryTerms = [
-      "grocery",
-      "supermarket",
-      "wholesale",
-      "hotel",
-      "resort"
-    ];
+    const badBakeryTerms = ["grocery", "supermarket", "wholesale", "hotel", "resort"];
     if (badBakeryTerms.some(term => text.includes(term))) return true;
   }
 
   if (leadType === "meal_prep") {
-    const badMealPrepTerms = [
-      "vitamin shop",
-      "supplement",
-      "nutrition store",
-      "gym",
-      "fitness center"
-    ];
+    const badMealPrepTerms = ["vitamin shop", "supplement", "nutrition store", "gym", "fitness center"];
     if (badMealPrepTerms.some(term => text.includes(term))) return true;
   }
 
   if (leadType === "catering") {
-    const badCateringTerms = [
-      "hotel",
-      "resort",
-      "country club",
-      "banquet hall",
-      "wedding venue"
-    ];
+    const badCateringTerms = ["hotel", "resort", "country club", "banquet hall", "wedding venue"];
     if (badCateringTerms.some(term => text.includes(term))) return true;
   }
 
@@ -391,14 +392,28 @@ async function existsInTable(table, dedupeKey) {
   return Array.isArray(data) && data.length > 0;
 }
 
-async function countBuffer() {
+async function countUsableInventory() {
   const { count, error } = await supabase
     .from("lead_buffer")
     .select("*", { count: "exact", head: true })
-    .eq("status", "buffer");
+    .in("status", ["buffer", "ready", "queued"]);
 
   if (error) {
-    console.error("Count buffer error:", error);
+    console.error("Count usable inventory error:", error);
+    return 0;
+  }
+
+  return count || 0;
+}
+
+async function countByStatus(status) {
+  const { count, error } = await supabase
+    .from("lead_buffer")
+    .select("*", { count: "exact", head: true })
+    .eq("status", status);
+
+  if (error) {
+    console.error(`Count ${status} error:`, error);
     return 0;
   }
 
@@ -436,7 +451,17 @@ async function fetchOutscraperResults(query, limit = RESULTS_PER_SEARCH) {
   throw new Error("Outscraper results still pending after max polls");
 }
 
-async function scrapeOneSearch(search) {
+async function scrapeOneSearch(search, maxInsertsRemaining) {
+  if (maxInsertsRemaining <= 0) {
+    return {
+      query: `${search.query}, ${search.city}, ${search.state}, US`,
+      rawPlaces: 0,
+      transformed: 0,
+      inserted: 0,
+      skippedDuplicates: 0
+    };
+  }
+
   const queryString = `${search.query}, ${search.city}, ${search.state}, US`;
   console.log(`\nFetching: ${queryString}`);
 
@@ -467,6 +492,11 @@ async function scrapeOneSearch(search) {
   const seenThisRun = new Set();
 
   for (const lead of transformed) {
+    if (inserted >= maxInsertsRemaining) {
+      console.log(`Reached this run's insert cap (${maxInsertsRemaining}) for ${queryString}`);
+      break;
+    }
+
     if (seenThisRun.has(lead.dedupe_key)) {
       console.log("Skipping same-run duplicate:", lead.business_name);
       skippedDuplicates++;
@@ -507,14 +537,35 @@ async function scrapeOneSearch(search) {
 }
 
 async function main() {
-  if (!OUTSCRAPER_API_KEY) {
-    console.error("Missing OUTSCRAPER_API_KEY");
+  const startingInventory = await countUsableInventory();
+  const startingBuffer = await countByStatus("buffer");
+  const startingReady = await countByStatus("ready");
+  const startingQueued = await countByStatus("queued");
+
+  console.log(`Starting usable inventory: ${startingInventory}`);
+  console.log(`Starting buffer: ${startingBuffer}`);
+  console.log(`Starting ready: ${startingReady}`);
+  console.log(`Starting queued: ${startingQueued}`);
+  console.log(`Refill trigger: ${REFILL_TRIGGER}`);
+  console.log(`Max leads: ${MAX_LEADS}`);
+  console.log(`Batch target this run: ${BATCH_TARGET}`);
+
+  if (startingInventory >= REFILL_TRIGGER) {
+    console.log(
+      `Inventory is at/above refill trigger (${startingInventory} >= ${REFILL_TRIGGER}). Exiting without scraping.`
+    );
     return;
   }
 
-  let bufferCount = await countBuffer();
-  console.log(`Starting buffer count: ${bufferCount}`);
-  console.log(`Target buffer count: ${TARGET_BUFFER}`);
+  const roomUntilMax = MAX_LEADS - startingInventory;
+  const targetThisRun = Math.min(BATCH_TARGET, roomUntilMax);
+
+  if (targetThisRun <= 0) {
+    console.log("Already at max capacity. Exiting.");
+    return;
+  }
+
+  console.log(`This run will try to add up to ${targetThisRun} leads.`);
 
   let totalRaw = 0;
   let totalTransformed = 0;
@@ -522,26 +573,47 @@ async function main() {
   let totalSkippedDuplicates = 0;
 
   for (const search of SEARCHES) {
-    if (bufferCount >= TARGET_BUFFER) {
-      console.log(`\nTarget reached. Buffer is now ${bufferCount}. Stopping scraper.`);
+    const remainingForRun = targetThisRun - totalInserted;
+    if (remainingForRun <= 0) {
+      console.log(`\nRun target reached. Inserted ${totalInserted} leads. Stopping scraper.`);
       break;
     }
 
-    const result = await scrapeOneSearch(search);
+    const currentInventory = await countUsableInventory();
+    if (currentInventory >= MAX_LEADS) {
+      console.log(`\nMax inventory reached (${currentInventory}). Stopping scraper.`);
+      break;
+    }
+
+    const result = await scrapeOneSearch(search, remainingForRun);
 
     totalRaw += result.rawPlaces;
     totalTransformed += result.transformed;
     totalInserted += result.inserted;
     totalSkippedDuplicates += result.skippedDuplicates;
 
-    bufferCount = await countBuffer();
-    console.log(`Current buffer count: ${bufferCount}`);
+    const updatedInventory = await countUsableInventory();
+    console.log(`Current usable inventory: ${updatedInventory}`);
   }
+
+  const finalInventory = await countUsableInventory();
+  const finalBuffer = await countByStatus("buffer");
+  const finalReady = await countByStatus("ready");
+  const finalQueued = await countByStatus("queued");
 
   console.log("\nFinished scrape_to_buffer");
   console.log({
-    targetBuffer: TARGET_BUFFER,
-    finalBuffer: bufferCount,
+    refillTrigger: REFILL_TRIGGER,
+    maxLeads: MAX_LEADS,
+    targetThisRun,
+    startingInventory,
+    finalInventory,
+    startingBuffer,
+    finalBuffer,
+    startingReady,
+    finalReady,
+    startingQueued,
+    finalQueued,
     totalRaw,
     totalTransformed,
     totalInserted,
@@ -551,4 +623,5 @@ async function main() {
 
 main().catch(err => {
   console.error("Fatal error:", err.message);
+  process.exit(1);
 });
