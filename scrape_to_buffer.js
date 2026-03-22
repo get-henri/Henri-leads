@@ -18,14 +18,14 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 // INVENTORY / RUN SETTINGS
 // =========================
 
-// Hard cap: never exceed this many usable leads total
-const MAX_LEADS = 10000;
+// Active unsent lead inventory cap (buffer + ready only)
+const MAX_LEADS = 400;
 
-// Refill only when inventory drops below this
-const REFILL_TRIGGER = 8000;
+// Start refilling when active unsent inventory drops below this
+const REFILL_TRIGGER = 200;
 
 // Max number of new leads to add per scraper run
-const BATCH_TARGET = 100;
+const BATCH_TARGET = 50;
 
 // How many Google Maps results to ask for per search
 const RESULTS_PER_SEARCH = 20;
@@ -36,111 +36,150 @@ const POLL_MS = 3000;
 // Max number of times to poll Outscraper before giving up
 const MAX_POLLS = 10;
 
+// Optional: throttle between search queries to be gentler / clearer in logs
+const BETWEEN_SEARCH_DELAY_MS = 500;
+
 // =========================
-// SEARCH MAP
+// STATE / CITY COVERAGE
 // =========================
 
-const SEARCHES = [
-  { query: "catering", city: "Tampa", state: "FL" },
-  { query: "meal prep", city: "Tampa", state: "FL" },
-  { query: "bakery", city: "Tampa", state: "FL" },
+// "Whole state" in practice means: cover many cities/metros across each state.
+// This gives much broader coverage without re-querying the same few cities forever.
 
-  { query: "catering", city: "Orlando", state: "FL" },
-  { query: "meal prep", city: "Orlando", state: "FL" },
-  { query: "bakery", city: "Orlando", state: "FL" },
+const STATE_CITIES = {
+  FL: [
+    "Miami",
+    "Fort Lauderdale",
+    "West Palm Beach",
+    "Orlando",
+    "Tampa",
+    "St. Petersburg",
+    "Jacksonville",
+    "Sarasota",
+    "Naples",
+    "Fort Myers",
+    "Boca Raton",
+    "Pensacola"
+  ],
+  GA: [
+    "Atlanta",
+    "Savannah",
+    "Augusta",
+    "Athens",
+    "Macon",
+    "Columbus",
+    "Roswell",
+    "Alpharetta"
+  ],
+  AL: [
+    "Birmingham",
+    "Mobile",
+    "Montgomery",
+    "Huntsville",
+    "Tuscaloosa"
+  ],
+  LA: [
+    "New Orleans",
+    "Baton Rouge",
+    "Lafayette",
+    "Shreveport",
+    "Lake Charles"
+  ],
+  TX: [
+    "Houston",
+    "Dallas",
+    "Austin",
+    "San Antonio",
+    "Fort Worth",
+    "Plano",
+    "Arlington",
+    "Irving",
+    "Corpus Christi",
+    "Lubbock",
+    "Waco",
+    "McAllen"
+  ],
+  TN: [
+    "Nashville",
+    "Memphis",
+    "Knoxville",
+    "Chattanooga",
+    "Clarksville"
+  ],
+  SC: [
+    "Charleston",
+    "Columbia",
+    "Greenville",
+    "Myrtle Beach"
+  ],
+  NC: [
+    "Charlotte",
+    "Raleigh",
+    "Durham",
+    "Greensboro",
+    "Winston-Salem",
+    "Asheville",
+    "Wilmington"
+  ],
+  VA: [
+    "Richmond",
+    "Virginia Beach",
+    "Norfolk",
+    "Arlington",
+    "Alexandria",
+    "Roanoke"
+  ],
+  OK: [
+    "Oklahoma City",
+    "Tulsa",
+    "Norman"
+  ],
+  AR: [
+    "Little Rock",
+    "Fayetteville",
+    "Fort Smith"
+  ],
+  KY: [
+    "Louisville",
+    "Lexington",
+    "Bowling Green"
+  ],
+  MS: [
+    "Jackson",
+    "Gulfport",
+    "Biloxi"
+  ]
+};
 
-  { query: "catering", city: "Miami", state: "FL" },
-  { query: "meal prep", city: "Miami", state: "FL" },
-  { query: "bakery", city: "Miami", state: "FL" },
-
-  { query: "catering", city: "Jacksonville", state: "FL" },
-  { query: "food truck", city: "Jacksonville", state: "FL" },
-
-  { query: "catering", city: "Atlanta", state: "GA" },
-  { query: "meal prep", city: "Atlanta", state: "GA" },
-  { query: "bakery", city: "Atlanta", state: "GA" },
-  { query: "food truck", city: "Atlanta", state: "GA" },
-
-  { query: "catering", city: "Savannah", state: "GA" },
-  { query: "bakery", city: "Savannah", state: "GA" },
-
-  { query: "catering", city: "Birmingham", state: "AL" },
-  { query: "meal prep", city: "Birmingham", state: "AL" },
-  { query: "bakery", city: "Birmingham", state: "AL" },
-
-  { query: "catering", city: "Mobile", state: "AL" },
-  { query: "meal prep", city: "Mobile", state: "AL" },
-
-  { query: "catering", city: "New Orleans", state: "LA" },
-  { query: "meal prep", city: "New Orleans", state: "LA" },
-  { query: "bakery", city: "New Orleans", state: "LA" },
-  { query: "food truck", city: "New Orleans", state: "LA" },
-
-  { query: "catering", city: "Baton Rouge", state: "LA" },
-  { query: "meal prep", city: "Baton Rouge", state: "LA" },
-
-  { query: "catering", city: "Houston", state: "TX" },
-  { query: "meal prep", city: "Houston", state: "TX" },
-  { query: "bakery", city: "Houston", state: "TX" },
-  { query: "food truck", city: "Houston", state: "TX" },
-
-  { query: "catering", city: "Dallas", state: "TX" },
-  { query: "meal prep", city: "Dallas", state: "TX" },
-  { query: "bakery", city: "Dallas", state: "TX" },
-  { query: "food truck", city: "Dallas", state: "TX" },
-
-  { query: "catering", city: "Austin", state: "TX" },
-  { query: "meal prep", city: "Austin", state: "TX" },
-  { query: "bakery", city: "Austin", state: "TX" },
-  { query: "food truck", city: "Austin", state: "TX" },
-
-  { query: "catering", city: "San Antonio", state: "TX" },
-  { query: "meal prep", city: "San Antonio", state: "TX" },
-  { query: "bakery", city: "San Antonio", state: "TX" },
-
-  { query: "catering", city: "Nashville", state: "TN" },
-  { query: "meal prep", city: "Nashville", state: "TN" },
-  { query: "bakery", city: "Nashville", state: "TN" },
-  { query: "food truck", city: "Nashville", state: "TN" },
-
-  { query: "catering", city: "Memphis", state: "TN" },
-  { query: "meal prep", city: "Memphis", state: "TN" },
-
-  { query: "catering", city: "Charleston", state: "SC" },
-  { query: "bakery", city: "Charleston", state: "SC" },
-
-  { query: "catering", city: "Columbia", state: "SC" },
-  { query: "meal prep", city: "Columbia", state: "SC" },
-
-  { query: "catering", city: "Charlotte", state: "NC" },
-  { query: "meal prep", city: "Charlotte", state: "NC" },
-  { query: "bakery", city: "Charlotte", state: "NC" },
-  { query: "food truck", city: "Charlotte", state: "NC" },
-
-  { query: "catering", city: "Raleigh", state: "NC" },
-  { query: "meal prep", city: "Raleigh", state: "NC" },
-  { query: "bakery", city: "Raleigh", state: "NC" },
-
-  { query: "catering", city: "Richmond", state: "VA" },
-  { query: "meal prep", city: "Richmond", state: "VA" },
-  { query: "bakery", city: "Richmond", state: "VA" },
-
-  { query: "catering", city: "Oklahoma City", state: "OK" },
-  { query: "meal prep", city: "Oklahoma City", state: "OK" },
-  { query: "bakery", city: "Oklahoma City", state: "OK" },
-
-  { query: "catering", city: "Little Rock", state: "AR" },
-  { query: "meal prep", city: "Little Rock", state: "AR" },
-  { query: "bakery", city: "Little Rock", state: "AR" },
-
-  { query: "catering", city: "Louisville", state: "KY" },
-  { query: "meal prep", city: "Louisville", state: "KY" },
-  { query: "bakery", city: "Louisville", state: "KY" },
-
-  { query: "catering", city: "Jackson", state: "MS" },
-  { query: "meal prep", city: "Jackson", state: "MS" },
-  { query: "bakery", city: "Jackson", state: "MS" }
+const QUERY_TYPES = [
+  "catering",
+  "meal prep",
+  "bakery",
+  "food truck"
 ];
+
+// If you want to slightly bias away from lower-yield categories later,
+// we can remove food truck from some states, but for now this keeps coverage broad.
+
+function buildSearches() {
+  const searches = [];
+
+  for (const [state, cities] of Object.entries(STATE_CITIES)) {
+    for (const city of cities) {
+      for (const query of QUERY_TYPES) {
+        searches.push({ query, city, state });
+      }
+    }
+  }
+
+  return searches;
+}
+
+const SEARCHES = buildSearches();
+
+// =========================
+// FILTERS
+// =========================
 
 const BLOCKED_NAME_TERMS = [
   "eataly",
@@ -197,6 +236,10 @@ const BLOCKED_WEBSITE_TERMS = [
   "slice.com",
   "goldbelly.com"
 ];
+
+// =========================
+// HELPERS
+// =========================
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -290,17 +333,35 @@ function shouldRejectByLeadType(place, leadType) {
     .toLowerCase();
 
   if (leadType === "bakery") {
-    const badBakeryTerms = ["grocery", "supermarket", "wholesale", "hotel", "resort"];
+    const badBakeryTerms = [
+      "grocery",
+      "supermarket",
+      "wholesale",
+      "hotel",
+      "resort"
+    ];
     if (badBakeryTerms.some(term => text.includes(term))) return true;
   }
 
   if (leadType === "meal_prep") {
-    const badMealPrepTerms = ["vitamin shop", "supplement", "nutrition store", "gym", "fitness center"];
+    const badMealPrepTerms = [
+      "vitamin shop",
+      "supplement",
+      "nutrition store",
+      "gym",
+      "fitness center"
+    ];
     if (badMealPrepTerms.some(term => text.includes(term))) return true;
   }
 
   if (leadType === "catering") {
-    const badCateringTerms = ["hotel", "resort", "country club", "banquet hall", "wedding venue"];
+    const badCateringTerms = [
+      "hotel",
+      "resort",
+      "country club",
+      "banquet hall",
+      "wedding venue"
+    ];
     if (badCateringTerms.some(term => text.includes(term))) return true;
   }
 
@@ -334,7 +395,7 @@ function transformPlace(place, search) {
   const leadType = classifyLeadType(place);
   if (!leadType) return null;
 
-  if (place.business_status !== "OPERATIONAL") return null;
+  if (place.business_status && place.business_status !== "OPERATIONAL") return null;
   if (!place.website) return null;
   if ((place.rating || 0) < 3.8) return null;
   if ((place.reviews || 0) < 10) return null;
@@ -343,12 +404,12 @@ function transformPlace(place, search) {
   if (shouldRejectByLeadType(place, leadType)) return null;
 
   const resultState = (place.state_code || place.state || "").trim().toUpperCase();
-  if (resultState !== search.state.toUpperCase()) return null;
+  if (resultState && resultState !== search.state.toUpperCase()) return null;
 
   const normalizedName = normalizeName(place.name);
   const websiteDomain = getWebsiteDomain(place.website);
-  const city = (place.city || "").trim();
-  const state = (place.state_code || place.state || "").trim();
+  const city = (place.city || search.city || "").trim();
+  const state = (place.state_code || place.state || search.state || "").trim();
 
   if (!normalizedName || !websiteDomain || !city || !state) return null;
 
@@ -377,6 +438,10 @@ function transformPlace(place, search) {
   };
 }
 
+// =========================
+// DATABASE CHECKS
+// =========================
+
 async function existsInTable(table, dedupeKey) {
   const { data, error } = await supabase
     .from(table)
@@ -392,11 +457,13 @@ async function existsInTable(table, dedupeKey) {
   return Array.isArray(data) && data.length > 0;
 }
 
+// Count only UNSENT inventory.
+// queued leads are already in Notion and should NOT reduce scraping.
 async function countUsableInventory() {
   const { count, error } = await supabase
     .from("lead_buffer")
     .select("*", { count: "exact", head: true })
-    .in("status", ["buffer", "ready", "queued"]);
+    .in("status", ["buffer", "ready"]);
 
   if (error) {
     console.error("Count usable inventory error:", error);
@@ -419,6 +486,10 @@ async function countByStatus(status) {
 
   return count || 0;
 }
+
+// =========================
+// OUTSCRAPER
+// =========================
 
 async function fetchOutscraperResults(query, limit = RESULTS_PER_SEARCH) {
   const startResponse = await axios.get(
@@ -450,6 +521,26 @@ async function fetchOutscraperResults(query, limit = RESULTS_PER_SEARCH) {
 
   throw new Error("Outscraper results still pending after max polls");
 }
+
+// =========================
+// SEARCH ROTATION
+// =========================
+
+// Rotates start position automatically based on 6-hour windows.
+// This prevents re-hitting the same few searches every run.
+function getRotatedSearches() {
+  const windowIndex = Math.floor(Date.now() / (6 * 60 * 60 * 1000));
+  const startIndex = windowIndex % SEARCHES.length;
+
+  return [
+    ...SEARCHES.slice(startIndex),
+    ...SEARCHES.slice(0, startIndex)
+  ];
+}
+
+// =========================
+// SCRAPE ONE SEARCH
+// =========================
 
 async function scrapeOneSearch(search, maxInsertsRemaining) {
   if (maxInsertsRemaining <= 0) {
@@ -536,19 +627,26 @@ async function scrapeOneSearch(search, maxInsertsRemaining) {
   };
 }
 
+// =========================
+// MAIN
+// =========================
+
 async function main() {
   const startingInventory = await countUsableInventory();
   const startingBuffer = await countByStatus("buffer");
   const startingReady = await countByStatus("ready");
   const startingQueued = await countByStatus("queued");
+  const startingFailed = await countByStatus("failed");
 
-  console.log(`Starting usable inventory: ${startingInventory}`);
+  console.log(`Starting usable inventory (buffer + ready): ${startingInventory}`);
   console.log(`Starting buffer: ${startingBuffer}`);
   console.log(`Starting ready: ${startingReady}`);
   console.log(`Starting queued: ${startingQueued}`);
+  console.log(`Starting failed: ${startingFailed}`);
   console.log(`Refill trigger: ${REFILL_TRIGGER}`);
   console.log(`Max leads: ${MAX_LEADS}`);
   console.log(`Batch target this run: ${BATCH_TARGET}`);
+  console.log(`Total search buckets: ${SEARCHES.length}`);
 
   if (startingInventory >= REFILL_TRIGGER) {
     console.log(
@@ -567,13 +665,16 @@ async function main() {
 
   console.log(`This run will try to add up to ${targetThisRun} leads.`);
 
+  const rotatedSearches = getRotatedSearches();
+
   let totalRaw = 0;
   let totalTransformed = 0;
   let totalInserted = 0;
   let totalSkippedDuplicates = 0;
 
-  for (const search of SEARCHES) {
+  for (const search of rotatedSearches) {
     const remainingForRun = targetThisRun - totalInserted;
+
     if (remainingForRun <= 0) {
       console.log(`\nRun target reached. Inserted ${totalInserted} leads. Stopping scraper.`);
       break;
@@ -594,12 +695,17 @@ async function main() {
 
     const updatedInventory = await countUsableInventory();
     console.log(`Current usable inventory: ${updatedInventory}`);
+
+    if (BETWEEN_SEARCH_DELAY_MS > 0) {
+      await sleep(BETWEEN_SEARCH_DELAY_MS);
+    }
   }
 
   const finalInventory = await countUsableInventory();
   const finalBuffer = await countByStatus("buffer");
   const finalReady = await countByStatus("ready");
   const finalQueued = await countByStatus("queued");
+  const finalFailed = await countByStatus("failed");
 
   console.log("\nFinished scrape_to_buffer");
   console.log({
@@ -614,6 +720,8 @@ async function main() {
     finalReady,
     startingQueued,
     finalQueued,
+    startingFailed,
+    finalFailed,
     totalRaw,
     totalTransformed,
     totalInserted,
