@@ -18,7 +18,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 const BATCH_SIZE = 100;
 const MAX_ATTEMPTS = 2;
 const REQUEST_TIMEOUT_MS = 5000;
-const MAX_INTERNAL_PAGES = 2;
+const MAX_INTERNAL_PAGES = 3;
 
 const COMMON_PATHS_FIRST_PASS = [
   "",
@@ -32,7 +32,9 @@ const COMMON_PATHS_SECOND_PASS = [
   "/about",
   "/contact-us",
   "/about-us",
-  "/catering"
+  "/catering",
+  "/events",
+  "/faq"
 ];
 
 const BLOCKED_EMAIL_PARTS = [
@@ -54,14 +56,9 @@ const BLOCKED_EMAIL_PARTS = [
   "grubhub",
   "doordash",
   "ubereats",
-  "ezcater"
+  "ezcater",
+  "placeholder"
 ];
-
-const COMMON_FIRST_NAMES = new Set([
-  "joe", "mike", "john", "dave", "steve", "chris", "matt", "mark",
-  "jessica", "jennifer", "ashley", "sarah", "emily", "anna", "alex",
-  "dan", "daniel", "kevin", "brian", "ryan", "sam", "tom", "tim"
-]);
 
 function normalizeUrl(url) {
   if (!url) return null;
@@ -139,62 +136,40 @@ function extractEmails(text) {
   return [...new Set(matches.map(e => e.toLowerCase().trim()))];
 }
 
-function looksLikePersonalFreeEmail(email) {
-  const lower = email.toLowerCase();
-  const [local, domain] = lower.split("@");
-
-  if (!domain) return true;
-
-  const isFreeDomain =
-    domain.includes("gmail.com") ||
-    domain.includes("outlook.com") ||
-    domain.includes("hotmail.com") ||
-    domain.includes("yahoo.com");
-
-  if (!isFreeDomain) return false;
-
-  if (!local) return true;
-  if (local.length <= 5 && COMMON_FIRST_NAMES.has(local)) return true;
-  if (/^[a-z]+$/.test(local) && COMMON_FIRST_NAMES.has(local)) return true;
-
-  return false;
-}
-
-function filterEmails(emails, websiteDomain, businessName = "") {
-  const businessTokens = businessName
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter(token => token.length >= 4);
-
+function filterEmails(emails) {
   return emails.filter(email => {
-    if (!email.includes("@")) return false;
-    if (email.length > 60) return false;
+    if (!email || !email.includes("@")) return false;
 
-    const lower = email.toLowerCase();
+    const lower = email.toLowerCase().trim();
+    const [local, domain] = lower.split("@");
+
+    if (!local || !domain) return false;
+    if (lower.length > 80) return false;
+    if (local.length < 2) return false;
+    if (domain.length < 4) return false;
 
     if (BLOCKED_EMAIL_PARTS.some(part => lower.includes(part))) return false;
-    if (looksLikePersonalFreeEmail(lower)) return false;
-
-    const isFreeDomain =
-      lower.includes("@gmail.com") ||
-      lower.includes("@outlook.com") ||
-      lower.includes("@hotmail.com") ||
-      lower.includes("@yahoo.com");
 
     if (
-      websiteDomain &&
-      !lower.endsWith(`@${websiteDomain}`) &&
-      !isFreeDomain
+      local === "example" ||
+      local === "test" ||
+      local === "user" ||
+      local === "name"
     ) {
       return false;
     }
 
-    if (isFreeDomain && businessTokens.length > 0) {
-      const local = lower.split("@")[0];
-      const overlapsBusiness = businessTokens.some(token => local.includes(token));
-      if (!overlapsBusiness && local.length < 10) return false;
+    if (
+      lower.endsWith(".png") ||
+      lower.endsWith(".jpg") ||
+      lower.endsWith(".jpeg") ||
+      lower.endsWith(".webp") ||
+      lower.endsWith(".svg")
+    ) {
+      return false;
     }
+
+    if (local.includes("noreply") || local.includes("no-reply")) return false;
 
     return true;
   });
@@ -204,25 +179,33 @@ function pickBestEmail(emails, websiteDomain) {
   if (!emails.length) return null;
 
   const scored = emails.map(email => {
-    const lower = email.toLowerCase();
+    const lower = email.toLowerCase().trim();
+    const [local, domain] = lower.split("@");
     let score = 0;
 
-    if (websiteDomain && lower.endsWith(`@${websiteDomain}`)) score += 10;
-    if (lower.startsWith("hello@")) score += 6;
-    if (lower.startsWith("info@")) score += 5;
-    if (lower.startsWith("contact@")) score += 5;
-    if (lower.startsWith("events@")) score += 5;
-    if (lower.startsWith("catering@")) score += 5;
-    if (lower.startsWith("orders@")) score += 4;
-    if (lower.startsWith("office@")) score += 3;
+    if (websiteDomain && domain === websiteDomain) score += 20;
+
+    if (local === "hello") score += 12;
+    if (local === "info") score += 11;
+    if (local === "contact") score += 11;
+    if (local === "office") score += 10;
+    if (local === "sales") score += 9;
+    if (local === "events") score += 9;
+    if (local === "catering") score += 10;
+    if (local === "orders") score += 8;
+    if (local === "admin") score += 3;
+
+    if (/^[a-z]+$/.test(local)) score += 5;
+    if (/^[a-z]+\.[a-z]+$/.test(local)) score += 6;
+    if (/^[a-z]+[0-9]*$/.test(local)) score += 4;
 
     if (
-      lower.includes("@gmail.com") ||
-      lower.includes("@outlook.com") ||
-      lower.includes("@hotmail.com") ||
-      lower.includes("@yahoo.com")
+      domain === "gmail.com" ||
+      domain === "outlook.com" ||
+      domain === "hotmail.com" ||
+      domain === "yahoo.com"
     ) {
-      score += 1;
+      score += 2;
     }
 
     return { email, score };
@@ -283,7 +266,7 @@ function sortInternalLinks(links, baseDomain) {
     return domain && baseDomain && domain === baseDomain;
   });
 
-  const priorityTerms = ["contact", "about", "catering"];
+  const priorityTerms = ["contact", "about", "catering", "events", "faq"];
 
   internal.sort((a, b) => {
     const aLower = a.toLowerCase();
@@ -301,7 +284,7 @@ function sortInternalLinks(links, baseDomain) {
   return [...new Set(internal)].slice(0, MAX_INTERNAL_PAGES);
 }
 
-async function crawlWebsiteForEmail(website, websiteDomain, businessName, attemptNumber) {
+async function crawlWebsiteForEmail(website, websiteDomain, attemptNumber) {
   const variants = buildWebsiteVariants(website, websiteDomain);
 
   let foundInstagramUrl = null;
@@ -320,11 +303,7 @@ async function crawlWebsiteForEmail(website, websiteDomain, businessName, attemp
       const html = await fetchHtml(pageUrl);
       if (!html) continue;
 
-      const pageEmails = filterEmails(
-        extractEmails(html),
-        baseDomain,
-        businessName
-      );
+      const pageEmails = filterEmails(extractEmails(html));
       allEmails.push(...pageEmails);
 
       if (!foundInstagramUrl) {
@@ -365,11 +344,7 @@ async function crawlWebsiteForEmail(website, websiteDomain, businessName, attemp
       const html = await fetchHtml(link);
       if (!html) continue;
 
-      const pageEmails = filterEmails(
-        extractEmails(html),
-        baseDomain,
-        businessName
-      );
+      const pageEmails = filterEmails(extractEmails(html));
       allEmails.push(...pageEmails);
 
       if (!foundInstagramUrl) {
@@ -398,13 +373,13 @@ async function crawlWebsiteForEmail(website, websiteDomain, businessName, attemp
   };
 }
 
-async function scrapeInstagramForEmail(instagramUrl, businessName) {
+async function scrapeInstagramForEmail(instagramUrl) {
   if (!instagramUrl) return null;
 
   const html = await fetchHtml(instagramUrl);
   if (!html) return null;
 
-  const directEmails = filterEmails(extractEmails(html), null, businessName);
+  const directEmails = filterEmails(extractEmails(html));
   if (directEmails.length) return directEmails[0];
 
   const links = extractLinks(html, instagramUrl);
@@ -421,7 +396,7 @@ async function scrapeInstagramForEmail(instagramUrl, businessName) {
   const linkedPage = await fetchHtml(fallbackBioLink);
   if (!linkedPage) return null;
 
-  const fallbackEmails = filterEmails(extractEmails(linkedPage), null, businessName);
+  const fallbackEmails = filterEmails(extractEmails(linkedPage));
   return fallbackEmails[0] || null;
 }
 
@@ -481,7 +456,6 @@ async function run() {
       const websiteResult = await crawlWebsiteForEmail(
         lead.website,
         lead.website_domain,
-        lead.business_name,
         attemptsAfterRun
       );
 
@@ -500,10 +474,7 @@ async function run() {
 
     if (!email && instagramUrl && attemptsAfterRun >= 2) {
       console.log("Trying Instagram...");
-      const instagramEmail = await scrapeInstagramForEmail(
-        instagramUrl,
-        lead.business_name
-      );
+      const instagramEmail = await scrapeInstagramForEmail(instagramUrl);
       if (instagramEmail) {
         email = instagramEmail;
       }
